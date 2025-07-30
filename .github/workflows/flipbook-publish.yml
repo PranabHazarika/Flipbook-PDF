@@ -26,14 +26,12 @@ jobs:
       - name: Publish to WordPress
         run: |
           curl -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
-            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -d @- <<EOF
-          {
+          -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
+          -H "Content-Type: application/json" \
+          -d '{
             "title": "${{ steps.extract.outputs.title }}",
             "status": "publish",
             "excerpt": "This is a flipbook from the Personal Development series.",
-            "content": "[dflip url='${{ steps.extract.outputs.raw_url }}']",
+            "content": "[dflip url=\\"${{ steps.extract.outputs.raw_url }}\\"]",
             "categories": [37]
-          }
-EOF
+          }'
