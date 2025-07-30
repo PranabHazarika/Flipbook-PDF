@@ -1,0 +1,39 @@
+name: Auto Publish Flipbook to WordPress
+
+on:
+  push:
+    paths:
+      - '**.pdf'
+
+jobs:
+  post_to_wordpress:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Detect PDF Upload
+        id: extract
+        run: |
+          PDF_FILE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep ".pdf$" | head -n 1)
+          echo "pdf_file=$PDF_FILE" >> $GITHUB_OUTPUT
+          TITLE=$(basename "$PDF_FILE" .pdf)
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF_FILE"
+          echo "raw_url=$RAW_URL" >> $GITHUB_OUTPUT
+
+      - name: Publish to WordPress
+        run: |
+          curl -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
+            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d @- <<EOF
+          {
+            "title": "${{ steps.extract.outputs.title }}",
+            "status": "publish",
+            "excerpt": "This is a flipbook from the Personal Development series.",
+            "content": "[dflip url='${{ steps.extract.outputs.raw_url }}']",
+            "categories": [37]
+          }
+EOF
