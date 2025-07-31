@@ -1,73 +1,92 @@
 name: Auto Publish Flipbook to WordPress
 
+# ← only run on PDF changes
 on:
   push:
     paths:
-      - '**.pdf'
+      - '**/*.pdf'
 
 jobs:
   post_to_wordpress:
     runs-on: ubuntu-latest
 
     steps:
+      # 1) get your PDF
       - name: Checkout Repo
         uses: actions/checkout@v3
 
+      # 2) detect which PDF was added/changed
       - name: Detect PDF Upload
         id: extract
         run: |
-          PDF_FILE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep ".pdf$" | head -n 1)
-          TITLE=$(basename "$PDF_FILE" .pdf)
-          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF_FILE"
+          PDF_FILE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
+                    | grep ".pdf$" | head -n 1)
           echo "pdf_file=$PDF_FILE" >> $GITHUB_ENV
+          TITLE=$(basename "$PDF_FILE" .pdf)
           echo "title=$TITLE" >> $GITHUB_ENV
+          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF_FILE"
           echo "raw_url=$RAW_URL" >> $GITHUB_ENV
 
+      # 3) bail out early if no PDF was found
+      - name: Exit if no PDF detected
+        run: |
+          if [ -z "$pdf_file" ]; then
+            echo "No PDF file detected; skipping."
+            exit 0
+          fi
+
+      # 4) install tools needed for text & image extraction
       - name: Install PDF Tools
         run: |
-          sudo apt update && sudo apt install -y poppler-utils imagemagick
+          sudo apt update
+          sudo apt install -y poppler-utils imagemagick
 
+      # 5) extract the first paragraph after the title as excerpt
       - name: Extract Excerpt from PDF
         id: excerpt
         run: |
-          TEXT_FILE="text_output.txt"
-          pdftotext "$pdf_file" "$TEXT_FILE"
-          EXCERPT=$(awk 'BEGIN{found=0} NF{ if(found) { print; exit } else { found=1 } }' "$TEXT_FILE")
-          if [ -z "$EXCERPT" ]; then
-            EXCERPT="Explore this flipbook to begin your journey."
+          pdftotext "$pdf_file" text_output.txt
+          # skip the very first non-empty line (title), then grab the next paragraph
+          EX=`awk 'BEGIN{found=0} NF{ if(found){ print; exit } else found=1 }' text_output.txt`
+          # fallback if that misses
+          if [ -z "$EX" ]; then
+            EX="Explore this flipbook to begin your journey."
           fi
-          CLEANED=$(echo "$EXCERPT" | sed 's/"/\\\"/g' | sed 's/\\/\\\\/g')
-          echo "excerpt=$CLEANED" >> $GITHUB_ENV
+          # escape quotes/backslashes for JSON
+          CLEAN=$(printf "%s" "$EX" | sed 's/\\/\\\\/g; s/"/\\"/g')
+          echo "excerpt=$CLEAN" >> $GITHUB_ENV
 
+      # 6) make a thumbnail from page 1
       - name: Generate PDF Thumbnail
         run: |
           mkdir -p thumbnails
-          output="thumbnails/preview.jpg"
-          pdftoppm "$pdf_file" -jpeg -f 1 -singlefile | convert - -resize 400x600 "$output"
+          pdftoppm "$pdf_file" -jpeg -f 1 -singlefile \
+            | convert - -resize 400x600 thumbnails/preview.jpg
 
+      # 7) upload that thumbnail to WP and capture its media ID
       - name: Upload Thumbnail to WordPress
         id: upload_thumb
         run: |
-          RESPONSE=$(curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/media" \
+          RESP=$(curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/media" \
             -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
             -H "Content-Disposition: attachment; filename=thumb.jpg" \
             -H "Content-Type: image/jpeg" \
-            --data-binary "@thumbnails/preview.jpg")
-          echo "RESPONSE=$RESPONSE"
-          MEDIA_ID=$(echo $RESPONSE | grep -o '"id":[0-9]*' | grep -o '[0-9]*')
-          echo "media_id=$MEDIA_ID" >> $GITHUB_OUTPUT
+            --data-binary "@/home/runner/work/${{ github.repository }}/thumbnails/preview.jpg")
+          echo "response=$RESP"
+          MID=$(echo $RESP | grep -o '"id":[0-9]*' | grep -o '[0-9]*')
+          echo "media_id=$MID" >> $GITHUB_ENV
 
+      # 8) finally, create the post with download disabled in the flipbook
       - name: Create WordPress Post
         run: |
           curl -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
-          -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "title": "'"${{ env.title }}"'",
-            "status": "publish",
-            "excerpt": "'"${{ env.excerpt }}"'",
-            "content": "[dflip url=\\"${{ env.raw_url }}\\" download=\\"false\\"]",
-            "categories": [37],
-            "featured_media": '"${{ steps.upload_thumb.outputs.media_id }}"'
-          }'
-
+            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "title": "'"${{ env.title }}"'",
+              "status": "publish",
+              "excerpt": "'"${{ env.excerpt }}"'",
+              "content": "[dflip url=\\"${{ env.raw_url }}\\" download=\\"false\\"]",
+              "categories": [37],
+              "featured_media": '"${{ env.media_id }}"'
+            }'
