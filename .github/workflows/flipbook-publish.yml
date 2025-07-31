@@ -2,6 +2,7 @@ name: Auto Publish Flipbook to WordPress
 
 on:
   push:
+    # Trigger only when PDFs change anywhere in the repo
     paths:
       - '**/*.pdf'
 
@@ -10,65 +11,49 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout your repo
+      # 1. Checkout your code & PDFs
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      # 2) Install PDF + image tools
-      - name: Install Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y poppler-utils imagemagick jq
+      # 2. Install jq (for JSON parsing in fallback detection)
+      - name: Install jq
+        run: sudo apt update && sudo apt install -y jq
 
-      # 3) Detect which PDF was added/changed
+      # 3. Detect which PDF was added or changed
       - name: Detect PDF Upload
-        id: extract
+        id: detect
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          # try diff-based detection
+          # 3a) Try diff-based detection
           PDF=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
                 | grep -E '\.pdf$' | head -n1)
-          # fallback to head_commit.added
+
+          # 3b) Fallback: look at head_commit.added in event payload
           if [ -z "$PDF" ]; then
             PDF=$(jq -r '.head_commit.added[]' "$GITHUB_EVENT_PATH" \
                   | grep -E '\.pdf$' | head -n1)
           fi
-          # exit if nothing found
+
+          # 3c) Exit cleanly if no PDF found
           if [ -z "$PDF" ]; then
             echo "No PDF detected; exiting."
             exit 0
           fi
-          echo "pdf_file=$PDF"    >> $GITHUB_ENV
+
+          # 3d) Export for later steps
+          echo "pdf_file=$PDF"     >> $GITHUB_ENV
           echo "title=$(basename "$PDF" .pdf)" >> $GITHUB_ENV
           echo "raw_url=https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF" >> $GITHUB_ENV
 
-      # 4) Exit early if no PDF
+      # 4. Fail early if somehow still no PDF
       - name: Exit if no PDF
         run: |
           if [ -z "$pdf_file" ]; then
             exit 0
           fi
 
-      # 5) Generate a thumbnail from page 1
-      - name: Generate PDF Thumbnail
-        run: |
-          mkdir -p thumbnails
-          pdftoppm "$pdf_file" -jpeg -f 1 -singlefile \
-            | convert - -resize 400x600 thumbnails/preview.jpg
-
-      # 6) Upload thumbnail to WordPress → capture media ID
-      - name: Upload Thumbnail to WordPress
-        id: upload_thumb
-        run: |
-          RESP=$(curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/media" \
-            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
-            -H "Content-Disposition: attachment; filename=preview.jpg" \
-            -H "Content-Type: image/jpeg" \
-            --data-binary "@thumbnails/preview.jpg")
-          echo "media_id=$(echo "$RESP" | jq -r '.id')" >> $GITHUB_ENV
-
-      # 7) Create the WordPress post (static excerpt, download disabled)
+      # 5. Create the WordPress post
       - name: Create WordPress Post
         run: |
           curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
@@ -77,8 +62,7 @@ jobs:
             -d '{
               "title": "'"${{ env.title }}"'",
               "status": "publish",
-              "excerpt": "This is a flipbook from the Personal Development series.",
+              "excerpt": "A new personal development flipbook – dive in!",
               "content": "[dflip url=\\"'"${{ env.raw_url }}"'\\" download=\\"false\\"]",
-              "categories": [37],
-              "featured_media": '"${{ env.media_id }}"'
+              "categories": [37]
             }'
