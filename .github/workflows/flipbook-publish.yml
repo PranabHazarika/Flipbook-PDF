@@ -23,7 +23,39 @@ jobs:
           RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF_FILE"
           echo "raw_url=$RAW_URL" >> $GITHUB_OUTPUT
 
-      - name: Publish to WordPress
+      - name: Install PDF Tools
+        run: |
+          sudo apt update && sudo apt install -y poppler-utils imagemagick
+
+      - name: Extract Excerpt from PDF
+        id: excerpt
+        run: |
+          TEXT_FILE="text_output.txt"
+          pdftotext "${{ steps.extract.outputs.pdf_file }}" "$TEXT_FILE"
+          # Remove the title (assumed to be the first non-empty line)
+          EXCERPT=$(awk 'BEGIN{found=0} NF{ if(found) { print; exit } else { found=1 } }' "$TEXT_FILE")
+          CLEANED=$(echo "$EXCERPT" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')
+          echo "excerpt=$CLEANED" >> $GITHUB_OUTPUT
+
+      - name: Generate PDF Thumbnail
+        run: |
+          mkdir -p thumbnails
+          pdf_file="${{ steps.extract.outputs.pdf_file }}"
+          output="thumbnails/preview.jpg"
+          pdftoppm "$pdf_file" -jpeg -f 1 -singlefile | convert - -resize 400x600 "$output"
+
+      - name: Upload Thumbnail to WordPress
+        id: upload_thumb
+        run: |
+          RESPONSE=$(curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/media" \
+            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
+            -H "Content-Disposition: attachment; filename=thumb.jpg" \
+            -H "Content-Type: image/jpeg" \
+            --data-binary "@thumbnails/preview.jpg")
+          MEDIA_ID=$(echo $RESPONSE | grep -o '"id":[0-9]*' | grep -o '[0-9]*')
+          echo "media_id=$MEDIA_ID" >> $GITHUB_OUTPUT
+
+      - name: Create WordPress Post
         run: |
           curl -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
           -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
@@ -31,7 +63,8 @@ jobs:
           -d '{
             "title": "${{ steps.extract.outputs.title }}",
             "status": "publish",
-            "excerpt": "This is a flipbook from the Personal Development series.",
-            "content": "[dflip url=\\"${{ steps.extract.outputs.raw_url }}\\"]",
-            "categories": [37]
+            "excerpt": "${{ steps.excerpt.outputs.excerpt }}",
+            "content": "[dflip url=\\"${{ steps.extract.outputs.raw_url }}\\" download=\\"false\\"]",
+            "categories": [37],
+            "featured_media": ${{ steps.upload_thumb.outputs.media_id }}
           }'
