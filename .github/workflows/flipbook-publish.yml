@@ -17,11 +17,11 @@ jobs:
         id: extract
         run: |
           PDF_FILE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep ".pdf$" | head -n 1)
-          echo "pdf_file=$PDF_FILE" >> $GITHUB_OUTPUT
           TITLE=$(basename "$PDF_FILE" .pdf)
-          echo "title=$TITLE" >> $GITHUB_OUTPUT
           RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF_FILE"
-          echo "raw_url=$RAW_URL" >> $GITHUB_OUTPUT
+          echo "pdf_file=$PDF_FILE" >> $GITHUB_ENV
+          echo "title=$TITLE" >> $GITHUB_ENV
+          echo "raw_url=$RAW_URL" >> $GITHUB_ENV
 
       - name: Install PDF Tools
         run: |
@@ -31,16 +31,17 @@ jobs:
         id: excerpt
         run: |
           TEXT_FILE="text_output.txt"
-          pdftotext "${{ steps.extract.outputs.pdf_file }}" "$TEXT_FILE"
-          # Remove the title (assumed to be the first non-empty line)
+          pdftotext "$pdf_file" "$TEXT_FILE"
           EXCERPT=$(awk 'BEGIN{found=0} NF{ if(found) { print; exit } else { found=1 } }' "$TEXT_FILE")
-          CLEANED=$(echo "$EXCERPT" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')
-          echo "excerpt=$CLEANED" >> $GITHUB_OUTPUT
+          if [ -z "$EXCERPT" ]; then
+            EXCERPT="Explore this flipbook to begin your journey."
+          fi
+          CLEANED=$(echo "$EXCERPT" | sed 's/"/\\\"/g' | sed 's/\\/\\\\/g')
+          echo "excerpt=$CLEANED" >> $GITHUB_ENV
 
       - name: Generate PDF Thumbnail
         run: |
           mkdir -p thumbnails
-          pdf_file="${{ steps.extract.outputs.pdf_file }}"
           output="thumbnails/preview.jpg"
           pdftoppm "$pdf_file" -jpeg -f 1 -singlefile | convert - -resize 400x600 "$output"
 
@@ -52,6 +53,7 @@ jobs:
             -H "Content-Disposition: attachment; filename=thumb.jpg" \
             -H "Content-Type: image/jpeg" \
             --data-binary "@thumbnails/preview.jpg")
+          echo "RESPONSE=$RESPONSE"
           MEDIA_ID=$(echo $RESPONSE | grep -o '"id":[0-9]*' | grep -o '[0-9]*')
           echo "media_id=$MEDIA_ID" >> $GITHUB_OUTPUT
 
@@ -61,10 +63,11 @@ jobs:
           -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
           -H "Content-Type: application/json" \
           -d '{
-            "title": "${{ steps.extract.outputs.title }}",
+            "title": "'"${{ env.title }}"'",
             "status": "publish",
-            "excerpt": "${{ steps.excerpt.outputs.excerpt }}",
-            "content": "[dflip url=\\"${{ steps.extract.outputs.raw_url }}\\" download=\\"false\\"]",
+            "excerpt": "'"${{ env.excerpt }}"'",
+            "content": "[dflip url=\\"${{ env.raw_url }}\\" download=\\"false\\"]",
             "categories": [37],
-            "featured_media": ${{ steps.upload_thumb.outputs.media_id }}
+            "featured_media": '"${{ steps.upload_thumb.outputs.media_id }}"'
           }'
+
