@@ -1,7 +1,6 @@
 name: Auto Publish Flipbook to WordPress
 
 on:
-  # Only run when PDF files change
   push:
     paths:
       - '**/*.pdf'
@@ -11,63 +10,54 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout your repo
+      # 1) Checkout your repo
       - name: Checkout Repo
         uses: actions/checkout@v3
 
-      # 2. Install required CLI tools (including jq for JSON parsing)
+      # 2) Install PDF + image tools
       - name: Install Dependencies
         run: |
           sudo apt update
           sudo apt install -y poppler-utils imagemagick jq
 
-      # 3. Detect which PDF was added/changed (fallback to head_commit.added)
+      # 3) Detect which PDF was added/changed
       - name: Detect PDF Upload
         id: extract
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          # Try diff-based detection first
+          # try diff-based detection
           PDF=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
                 | grep -E '\.pdf$' | head -n1)
-
-          # If none found, look at the event payload's head_commit.added list
+          # fallback to head_commit.added
           if [ -z "$PDF" ]; then
             PDF=$(jq -r '.head_commit.added[]' "$GITHUB_EVENT_PATH" \
                   | grep -E '\.pdf$' | head -n1)
           fi
-
-          # Fail-fast if still empty
+          # exit if nothing found
           if [ -z "$PDF" ]; then
-            echo "❌ No PDF detected; exiting."
+            echo "No PDF detected; exiting."
+            exit 0
+          fi
+          echo "pdf_file=$PDF"    >> $GITHUB_ENV
+          echo "title=$(basename "$PDF" .pdf)" >> $GITHUB_ENV
+          echo "raw_url=https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF" >> $GITHUB_ENV
+
+      # 4) Exit early if no PDF
+      - name: Exit if no PDF
+        run: |
+          if [ -z "$pdf_file" ]; then
             exit 0
           fi
 
-          # Export to environment
-          echo "pdf_file=$PDF" >> $GITHUB_ENV
-          TITLE=$(basename "$PDF" .pdf)
-          echo "title=$TITLE" >> $GITHUB_ENV
-          RAW="https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF"
-          echo "raw_url=$RAW" >> $GITHUB_ENV
-
-      # 4. Extract the first paragraph after title as excerpt
-      - name: Extract Excerpt from PDF
-        id: excerpt
-        run: |
-          pdftotext "$pdf_file" text_output.txt
-          EX=$(awk 'BEGIN{found=0} NF{ if(found){ print; exit } else { found=1 } }' text_output.txt)
-          [ -z "$EX" ] && EX="Explore this flipbook to begin your journey."
-          CLEAN=$(printf "%s" "$EX" | sed 's/\\/\\\\/g; s/"/\\"/g')
-          echo "excerpt=$CLEAN" >> $GITHUB_ENV
-
-      # 5. Generate a thumbnail from page 1
+      # 5) Generate a thumbnail from page 1
       - name: Generate PDF Thumbnail
         run: |
           mkdir -p thumbnails
           pdftoppm "$pdf_file" -jpeg -f 1 -singlefile \
             | convert - -resize 400x600 thumbnails/preview.jpg
 
-      # 6. Upload thumbnail to WordPress and capture media ID
+      # 6) Upload thumbnail to WordPress → capture media ID
       - name: Upload Thumbnail to WordPress
         id: upload_thumb
         run: |
@@ -76,10 +66,9 @@ jobs:
             -H "Content-Disposition: attachment; filename=preview.jpg" \
             -H "Content-Type: image/jpeg" \
             --data-binary "@thumbnails/preview.jpg")
-          MEDIA_ID=$(echo "$RESP" | jq -r '.id')
-          echo "media_id=$MEDIA_ID" >> $GITHUB_ENV
+          echo "media_id=$(echo "$RESP" | jq -r '.id')" >> $GITHUB_ENV
 
-      # 7. Create the WordPress post with download disabled
+      # 7) Create the WordPress post (static excerpt, download disabled)
       - name: Create WordPress Post
         run: |
           curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
@@ -88,7 +77,7 @@ jobs:
             -d '{
               "title": "'"${{ env.title }}"'",
               "status": "publish",
-              "excerpt": "'"${{ env.excerpt }}"'",
+              "excerpt": "This is a flipbook from the Personal Development series.",
               "content": "[dflip url=\\"'"${{ env.raw_url }}"'\\" download=\\"false\\"]",
               "categories": [37],
               "featured_media": '"${{ env.media_id }}"'
