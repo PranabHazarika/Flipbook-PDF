@@ -1,0 +1,103 @@
+name: Post PDF to WordPress
+
+on:
+  push:
+    paths:
+      - '*.pdf'
+  workflow_dispatch:
+
+jobs:
+  post_to_wordpress:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set up job
+      run: echo "📄 Starting Flipbook upload automation..."
+
+    - name: Checkout Repo
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 1
+
+    - name: Install jq
+      run: sudo apt-get install jq -y
+
+    - name: Detect PDF Upload
+      id: detect_pdf
+      run: |
+        echo "🔍 Checking for uploaded PDFs..."
+        pdf_file=$(find . -maxdepth 1 -name '*.pdf' | head -n 1)
+        if [ -z "$pdf_file" ]; then
+          echo "❌ No PDF found. Exiting."
+          echo "found=false" >> $GITHUB_OUTPUT
+        else
+          echo "✅ Found PDF: $pdf_file"
+          echo "found=true" >> $GITHUB_OUTPUT
+          echo "pdf=$pdf_file" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Exit if no PDF
+      if: steps.detect_pdf.outputs.found == 'false'
+      run: exit 0
+
+    - name: Create WordPress Post
+      env:
+        WP_SITE_URL: ${{ secrets.WP_SITE_URL }}
+        WP_USERNAME: ${{ secrets.WP_USERNAME }}
+        WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+      run: |
+        FILE="${{ steps.detect_pdf.outputs.pdf }}"
+        TITLE=$(basename "$FILE" .pdf | sed 's/-/ /g' | sed 's/_/ /g')
+        PDF_URL="$WP_SITE_URL/wp-content/uploads/$(basename "$FILE")"
+
+        echo "📝 Preparing post titled: $TITLE"
+        echo "🔗 Link: $PDF_URL"
+
+        # Optional: Get category ID from WordPress (hardcoded fallback if already known)
+        CATEGORY_NAME="Flipbook-Personal Development"
+
+        category_response=$(curl -s -X GET "$WP_SITE_URL/wp-json/wp/v2/categories?search=$CATEGORY_NAME" \
+          --user "$WP_USERNAME:$WP_APP_PASSWORD")
+
+        CATEGORY_ID=$(echo "$category_response" | jq '.[0].id // 0')
+
+        if [ "$CATEGORY_ID" -eq 0 ]; then
+          echo "⚠️ Category not found. Creating it..."
+
+          CATEGORY_ID=$(curl -s -X POST "$WP_SITE_URL/wp-json/wp/v2/categories" \
+            --user "$WP_USERNAME:$WP_APP_PASSWORD" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"$CATEGORY_NAME\"}" | jq '.id')
+
+          echo "✅ Created category ID: $CATEGORY_ID"
+        else
+          echo "✅ Existing category ID: $CATEGORY_ID"
+        fi
+
+        post_data=$(jq -n \
+          --arg title "$TITLE" \
+          --arg content "📘 Read the flipbook PDF: <a href='$PDF_URL'>$TITLE</a>" \
+          --arg status "publish" \
+          --argjson categories "[$CATEGORY_ID]" \
+          '{title: $title, content: $content, status: $status, categories: $categories}')
+
+        echo "📤 Sending post to WordPress..."
+
+        response=$(curl -s -w "\n%{http_code}" -X POST "$WP_SITE_URL/wp-json/wp/v2/posts" \
+          --user "$WP_USERNAME:$WP_APP_PASSWORD" \
+          -H "Content-Type: application/json" \
+          -d "$post_data")
+
+        body=$(echo "$response" | sed '$d')
+        status=$(echo "$response" | tail -n1)
+
+        echo "🖥️ Response Status: $status"
+        echo "🖨️ Response Body:"
+        echo "$body"
+
+        if [ "$status" -ge 400 ]; then
+          echo "❌ Post creation failed."
+          exit 1
+        else
+          echo "✅ WordPress post published successfully!"
+        fi
