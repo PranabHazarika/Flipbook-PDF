@@ -1,0 +1,63 @@
+name: Auto Publish Flipbook to WordPress
+
+on:
+  push:
+    # Trigger only when PDFs change anywhere in the repo
+    paths:
+      - '**/*.pdf'
+
+jobs:
+  post_to_wordpress:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout your code & PDFs
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      # 2. Install jq (for JSON parsing in fallback detection)
+      - name: Install jq
+        run: sudo apt update && sudo apt install -y jq
+
+      # 3. Detect which PDF was added or changed
+      - name: Detect PDF Upload
+        id: detect
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: |
+          # 3a) Try diff-based detection
+          PDF=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
+                | grep -E '\.pdf$' | head -n1)
+          # 3b) Fallback: look at head_commit.added in event payload
+          if [ -z "$PDF" ]; then
+            PDF=$(jq -r '.head_commit.added[]' "$GITHUB_EVENT_PATH" \
+                  | grep -E '\.pdf$' | head -n1)
+          fi
+          # 3c) Exit cleanly if no PDF found
+          if [ -z "$PDF" ]; then
+            echo "No PDF detected; exiting."
+            exit 0
+          fi
+          # 3d) Export for later steps
+          echo "pdf_file=$PDF"     >> $GITHUB_ENV
+          echo "title=$(basename "$PDF" .pdf)" >> $GITHUB_ENV
+          echo "raw_url=https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF" >> $GITHUB_ENV
+      # 4. Fail early if somehow still no PDF
+      - name: Exit if no PDF
+        run: |
+          if [ -z "$pdf_file" ]; then
+            exit 0
+          fi
+      # 5. Create the WordPress post
+      - name: Create WordPress Post
+        run: |
+          curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
+            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "title": "'"${{ env.title }}"'",
+              "status": "publish",
+              "excerpt": "A new personal development flipbook – dive in!",
+              "content": "[dflip url=\\"'"${{ env.raw_url }}"'\\" download=\\"false\\"]",
+              "categories": [37]
+            }'
