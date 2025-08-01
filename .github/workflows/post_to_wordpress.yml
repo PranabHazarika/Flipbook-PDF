@@ -1,63 +1,100 @@
-name: Auto Publish Flipbook to WordPress
+name: Auto Publish PDF Flipbook to WordPress
 
 on:
   push:
-    # Trigger only when PDFs change anywhere in the repo
     paths:
       - '**/*.pdf'
+  workflow_dispatch:
 
 jobs:
   post_to_wordpress:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout your code & PDFs
-      - name: Checkout Repo
+      - name: 📦 Checkout repository
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
 
-      # 2. Install jq (for JSON parsing in fallback detection)
-      - name: Install jq
-        run: sudo apt update && sudo apt install -y jq
+      - name: 🔧 Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      # 3. Detect which PDF was added or changed
-      - name: Detect PDF Upload
+      - name: 🔍 Detect which PDF changed
         id: detect
-        env:
-          GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          # 3a) Try diff-based detection
+          echo "Looking for changed PDF..."
+          # Look at what was added/modified in this push
           PDF=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} \
                 | grep -E '\.pdf$' | head -n1)
-          # 3b) Fallback: look at head_commit.added in event payload
+          # Fallback: first PDF in repo
           if [ -z "$PDF" ]; then
-            PDF=$(jq -r '.head_commit.added[]' "$GITHUB_EVENT_PATH" \
-                  | grep -E '\.pdf$' | head -n1)
+            PDF=$(find . -type f -name '*.pdf' | head -n1 | sed 's|^\./||')
           fi
-          # 3c) Exit cleanly if no PDF found
           if [ -z "$PDF" ]; then
-            echo "No PDF detected; exiting."
-            exit 0
+            echo "❌ No PDF found. Exiting."
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Will process PDF: $PDF"
+            echo "found=true"  >> $GITHUB_OUTPUT
+            echo "pdf=$PDF"   >> $GITHUB_OUTPUT
           fi
-          # 3d) Export for later steps
-          echo "pdf_file=$PDF"     >> $GITHUB_ENV
-          echo "title=$(basename "$PDF" .pdf)" >> $GITHUB_ENV
-          echo "raw_url=https://raw.githubusercontent.com/${{ github.repository }}/main/$PDF" >> $GITHUB_ENV
-      # 4. Fail early if somehow still no PDF
-      - name: Exit if no PDF
+
+      - name: 🚫 Exit early if no PDF
+        if: steps.detect.outputs.found == 'false'
+        run: exit 0
+
+      - name: 📝 Publish to WordPress
+        env:
+          WP_SITE_URL:     ${{ secrets.WP_SITE_URL }}
+          WP_USERNAME:     ${{ secrets.WP_USERNAME }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
         run: |
-          if [ -z "$pdf_file" ]; then
-            exit 0
+          FILE="${{ steps.detect.outputs.pdf }}"
+          TITLE=$(basename "$FILE" .pdf | sed 's/[-_]/ /g')
+          PDF_URL="$WP_SITE_URL/wp-content/uploads/$(basename "$FILE")"
+          CATEGORY_NAME="Flipbook-Personal Development"
+
+          echo "✔️ Title: $TITLE"
+          echo "✔️ PDF URL: $PDF_URL"
+
+          # Find or create category
+          CAT_ID=$(curl -s "${WP_SITE_URL}/wp-json/wp/v2/categories?search=$CATEGORY_NAME" \
+                    -u "$WP_USERNAME:$WP_APP_PASSWORD" \
+                 | jq -r '.[0].id // empty')
+          if [ -z "$CAT_ID" ]; then
+            echo "➕ Creating category “$CATEGORY_NAME”"
+            CAT_ID=$(curl -s -X POST "${WP_SITE_URL}/wp-json/wp/v2/categories" \
+                       -u "$WP_USERNAME:$WP_APP_PASSWORD" \
+                       -H "Content-Type: application/json" \
+                       -d "{\"name\":\"$CATEGORY_NAME\"}" \
+                    | jq -r '.id')
           fi
-      # 5. Create the WordPress post
-      - name: Create WordPress Post
-        run: |
-          curl -s -X POST "${{ secrets.WP_SITE_URL }}/wp-json/wp/v2/posts" \
-            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "title": "'"${{ env.title }}"'",
-              "status": "publish",
-              "excerpt": "A new personal development flipbook – dive in!",
-              "content": "[dflip url=\\"'"${{ env.raw_url }}"'\\" download=\\"false\\"]",
-              "categories": [37]
-            }'
+          echo "📂 Category ID: $CAT_ID"
+
+          # Build post JSON
+          read -r -d '' POST_JSON <<EOF
+{
+  "title": "$TITLE",
+  "content": "📘 Read the flipbook PDF: <a href=\"$PDF_URL\">$TITLE</a>",
+  "status": "publish",
+  "categories": [$CAT_ID]
+}
+EOF
+
+          echo "📤 Sending to WordPress…"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${WP_SITE_URL}/wp-json/wp/v2/posts" \
+                       -u "$WP_USERNAME:$WP_APP_PASSWORD" \
+                       -H "Content-Type: application/json" \
+                       -d "$POST_JSON")
+
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          STATUS=$(echo "$RESPONSE" | tail -n1)
+
+          echo "🖥️ Status: $STATUS"
+          echo "🖨️ Body: $BODY"
+
+          if [ "$STATUS" -ge 400 ]; then
+            echo "❌ Failed to create post"
+            exit 1
+          fi
+          echo "✅ Post published!"
