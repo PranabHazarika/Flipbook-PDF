@@ -59,5 +59,5 @@ jobs:
               "status": "publish",
               "excerpt": "A new personal development flipbook – dive in!",
               "content": "[dflip url=\\"'"${{ env.raw_url }}"'\\" download=\\"false\\"]",
-              "categories": [37]
+              "categories": [36]
             }'
